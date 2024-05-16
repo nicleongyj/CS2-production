@@ -1,0 +1,23 @@
+description: Ultralytics YOLOv8_hdb model trained on /home/vishal/Matthew/garbage_detection/datasets/open_images/data.yaml
+author: Ultralytics
+date: '2024-05-14T12:48:51.524170'
+version: 8.2.14
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: detect
+batch: 1
+imgsz:
+- 640
+- 640
+names:
+  0: Bicycle
+  1: Chair
+  2: Box
+  3: Table
+  4: Plastic bag
+  5: Flowerpot
+  6: Luggage and bags
+  7: Umbrella
+  8: Shopping trolley
+  9: Person
