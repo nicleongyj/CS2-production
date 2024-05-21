@@ -1,61 +1,3 @@
-from pycocotools.coco import COCO
-import json
-
-# Class names to filter
-class_names = ["bicycle", "chair", "box", "table", "plastic bag", "flowerpot", 
-               "luggage and bags", "umbrella", "shopping trolley", "person", "luggage", 'bags','person','suitcase','couch']
-
-# Map class names to COCO category IDs
-def get_category_ids(coco, class_names):
-    category_ids = []
-    for category in coco.loadCats(coco.getCatIds()):
-        if category['name'] in class_names:
-            category_ids.append(category['id'])
-    return category_ids
-
-# # # Load COCO annotations
-coco = COCO('COCO/annotations/instances_val2017.json')
-
-# # Get category IDs for the specified classes
-category_ids = get_category_ids(coco, class_names)
-category_ids = [46]
-
-image_ids = set()
-for cat_id in category_ids:
-    image_ids.update(coco.getImgIds(catIds=[46]))
-
-image_ids = list(image_ids)
-print("Total number of test images:", len(image_ids))
-
-# Filter annotations
-filtered_annotations = {
-    'images': [],
-    'annotations': [],
-    'categories': [cat for cat in coco.loadCats(coco.getCatIds()) if cat['id'] in category_ids]
-}
-filtered_annotations = {
-    'images': [],
-    'annotations': [],
-    'categories': [cat for cat in coco.loadCats(coco.getCatIds()) if cat['id'] in category_ids]
-}
-
-# Add filtered images
-for img_id in image_ids:
-    image_info = coco.loadImgs(img_id)[0]
-    filtered_annotations['images'].append(image_info)
-
-# Add filtered annotations
-for ann in coco.loadAnns(coco.getAnnIds(imgIds=image_ids, catIds=category_ids)):
-    if ann['category_id'] in category_ids:
-        filtered_annotations['annotations'].append(ann)
-
-filtered_annotations_path = "COCO/annotations/filtered_annotations.json"
-with open(filtered_annotations_path, 'w') as f:
-    json.dump(filtered_annotations, f)
-
-
-
-
 import torch
 from torchvision import transforms
 from PIL import Image
@@ -64,8 +6,8 @@ from ultralytics import YOLO
 import os
 import json
 from PIL import Image, ImageDraw
+import time
 
-# Load filtered annotations
 def load_annotations(annotations_path):
     with open(annotations_path, 'r') as f:
         annotations = json.load(f)
@@ -81,37 +23,38 @@ def predict_image(model, image_path):
 def load_and_preprocess_image(image_path):
     image = Image.open(image_path).convert('RGB')
     transform = transforms.Compose([
-        transforms.Resize((640, 640)),  # Resize the image to (640, 640)
-        transforms.ToTensor(),  # Convert PIL image to torch tensor
+        transforms.Resize((640, 640)), 
+        transforms.ToTensor(), 
     ])
     image = transform(image).unsqueeze(0)  # Add batch dimension
     return image
 
-# Calculate IoU (Intersection over Union)
 def calculate_iou(bbox1, bbox2):
+    # Convert annotations from xywh to xyxy format
+    x, y, w, h = bbox2
+    bbox2_xyxy = [x, y, x + w, y + h]
+    
     # Extract coordinates from bounding boxes
     xmin1, ymin1, xmax1, ymax1 = bbox1
-    xmin2, ymin2, xmax2, ymax2 = bbox2
+    xmin2, ymin2, xmax2, ymax2 = bbox2_xyxy
 
-    # Calculate intersection coordinates
+    # Intersection coordinates
     x1 = max(xmin1, xmin2)
     y1 = max(ymin1, ymin2)
     x2 = min(xmax1, xmax2)
     y2 = min(ymax1, ymax2)
 
-    # Calculate intersection area
+    # Intersection area
     intersection_area = max(0, x2 - x1) * max(0, y2 - y1)
 
-    # Calculate union area
+    # Union area
     box1_area = (xmax1 - xmin1) * (ymax1 - ymin1)
     box2_area = (xmax2 - xmin2) * (ymax2 - ymin2)
     union_area = box1_area + box2_area - intersection_area
-    # Calculate IoU
     iou = intersection_area / union_area if union_area != 0 else 0
-
     return iou
 
-# Evaluate detected objects against ground truth annotations
+
 def evaluate_detections(annotations, detections, image_id, iou_threshold=0.5):
     true_positives = 0
     false_positives = 0
@@ -119,18 +62,10 @@ def evaluate_detections(annotations, detections, image_id, iou_threshold=0.5):
     gt_annotations = [ann for ann in annotations['annotations'] if ann['image_id'] == image_id]
     matched_gt = set()
 
-    for ann in gt_annotations:
-        print(ann['bbox'])
-    print("\n")
     for detection in detections:
-        print(detection)
-
-    for detection in detections:
-        
         max_iou = 0
         matched_gt_ann = None
         for gt_ann in gt_annotations:
-
             iou = calculate_iou(detection[:4], gt_ann['bbox'])
             if iou > max_iou:
                 max_iou = iou
@@ -146,56 +81,68 @@ def evaluate_detections(annotations, detections, image_id, iou_threshold=0.5):
 
     precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
     recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
+    f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
 
-    return precision, recall
+    return precision, recall, f1_score
+
 
 def visualize(image_path, detections, annotations):
     image = Image.open(image_path)
     draw = ImageDraw.Draw(image)
     
-    # Draw detections in green
+    # Detections in green
     for detection in detections:
         draw.rectangle(detection[:4], outline="green")
     
-    # Draw annotations in red
+    # Annotations in red
     for ann in annotations:
         bbox = ann['bbox']
+        x, y, w, h = bbox
+        x1, y1, x2, y2 = x, y, x + w, y + h
+        draw.rectangle([x1, y1, x2, y2], outline="red", width=2)
         draw.rectangle(bbox, outline="red")
     
     image.show()
 
 
-# Main function to test the PyTorch YOLO model
 def test_yolo_model(model, annotations_path, image_dir):
     with open(annotations_path, 'r') as f:
         annotations = json.load(f)
     precisions = []
     recalls = []    
+    f1_scores = []
+    processing_times = []
 
     with torch.no_grad():
         for image_info in annotations['images']:
-            print(image_info['id'])
             image_path = os.path.join(image_dir, image_info['file_name'])
+            
+            time_start = time.time()
             results = model(image_path)
-
-            # Extract bounding boxes from results
+            processing_time = time.time() - time_start
+            
             detections = []
             for result in results:
-                boxes = result.boxes.xyxy.cpu().numpy()  # Convert to numpy array
+                boxes = result.boxes.xyxy.cpu().numpy()  
                 for box in boxes:
-                    detections.append(box.tolist())  # Convert each box to a list
-            precision, recall = evaluate_detections(annotations, detections, image_info['id'])
+                    detections.append(box.tolist())  
+
+            precision, recall, f1_score = evaluate_detections(annotations, detections, image_info['id'])
             precisions.append(precision)
             recalls.append(recall)
+            f1_scores.append(f1_score)
+            processing_times.append(processing_time)
 
-            print(f"Image ID: {image_info['id']} - Precision: {precision}, Recall: {recall}")
-            visualize(image_path, detections, [ann for ann in annotations['annotations'] if ann['image_id'] == image_info['id']])
-            break
+            print(f"Image ID: {image_info['id']} - Precision: {precision}, Recall: {recall}", f"F1 Score: {f1_score}")
+            # visualize(image_path, detections, [ann for ann in annotations['annotations'] if ann['image_id'] == image_info['id']])
 
-    # Calculate mean precision and recall
     mean_precision = np.mean(precisions) if precisions else 0
     mean_recall = np.mean(recalls) if recalls else 0
-    print(f"Mean Precision: {mean_precision}, Mean Recall: {mean_recall}")
+    mean_f1_score = np.mean(f1_scores) if f1_scores else 0
+    mean_processing_time = np.mean(processing_times) if processing_times else 0
+    print(f"Mean Precision: {mean_precision}, Mean Recall: {mean_recall}", f"Mean F1 Score: {mean_f1_score}", f"Mean Processing Time: {mean_processing_time}")
+
+
 
 annotations_path = 'COCO/annotations/instances_val2017.json'
 image_dir = 'datasets/images/val/val2017'
