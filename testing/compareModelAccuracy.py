@@ -112,9 +112,11 @@ def test_yolo_model(model, annotations_path, image_dir):
     recalls = []    
     f1_scores = []
     processing_times = []
+    count = 0 
 
     with torch.no_grad():
         for image_info in annotations['images']:
+            count+=1
             image_path = os.path.join(image_dir, image_info['file_name'])
             
             time_start = time.time()
@@ -140,12 +142,38 @@ def test_yolo_model(model, annotations_path, image_dir):
     mean_recall = np.mean(recalls) if recalls else 0
     mean_f1_score = np.mean(f1_scores) if f1_scores else 0
     mean_processing_time = np.mean(processing_times) if processing_times else 0
+    print(f"Total images processed: {count}")
     print(f"Mean Precision: {mean_precision}, Mean Recall: {mean_recall}", f"Mean F1 Score: {mean_f1_score}", f"Mean Processing Time: {mean_processing_time}")
 
 
 
 annotations_path = 'COCO/annotations/instances_val2017.json'
 image_dir = 'datasets/images/val/val2017'
-model_path = "yolov8_hdb.pt"
-model = YOLO(model_path)
-test_yolo_model(model, annotations_path, image_dir)
+
+filtered_annotations_path = "COCO/annotations/sampled_annotations.json"
+filtered_image_dir = "datasets/images/val/filtered_val2017"
+
+nano_model_path = "yolov8n.pt"
+pt_model_path = "yolov8_hdb.pt"
+tflite_model_path = "saved_model/yolov8_hdb_float32.tflite"
+
+model = YOLO(tflite_model_path)
+# test_yolo_model(model, annotations_path, image_dir)
+test_yolo_model(model, filtered_annotations_path, filtered_image_dir)
+
+
+
+
+############################## Results ###############################
+# Precision: Accuracy of positive predicitions
+# Recall: Ability to correctly identify positive instances
+# F1 score: Overall performance
+#
+# Complete dataset
+# HDB_PT : Mean Precision: 0.403, Mean Recall: 0.152 Mean F1 Score: 0.200 Mean Processing Time: 0.057
+# 
+# Sampled dataset
+# NANO   : Mean Precision: 0.468, Mean Recall: 0.731 Mean F1 Score: 0.525 Mean Processing Time: 0.0566
+# HDB_PT : Mean Precision: 0.361, Mean Recall: 0.256 Mean F1 Score: 0.267 Mean Processing Time: 0.0527
+# TFlite : Mean Precision: 0.351, Mean Recall: 0.257 Mean F1 Score: 0.264 Mean Processing Time: 0.139
+######################################################################
