@@ -1,0 +1,17 @@
+
+path: ../datasets
+train: images/val/val2017
+val: images/val/val2017
+nc: 10
+names:
+  0: Bicycle
+  1: Chair
+  2: Box
+  3: Table
+  4: Plastic bag
+  5: Flowerpot
+  6: Luggage and bags
+  7: Umbrella
+  8: Shopping trolley
+  9: Person
+
