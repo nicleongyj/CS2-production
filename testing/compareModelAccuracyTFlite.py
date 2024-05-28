@@ -1,76 +1,96 @@
-import tensorflow as tf
-import cv2
-import numpy as np
+import torch
+from torchvision import transforms
 from PIL import Image, ImageDraw
-import json
+import numpy as np
+from ultralytics import YOLO
 import os
 import time
+from letterbox import LetterBox
+import cv2
+import numpy as np
+from ProcessTFLite import ProcessTFLite
+import tensorflow as tf
 
-def load_annotations(annotations_path):
-    with open(annotations_path, 'r') as f:
-        annotations = json.load(f)
+def load_annotations(label_path, img_width, img_height, target_width=640, target_height=640):
+    with open(label_path, 'r') as f:
+        lines = f.readlines()
+    annotations = []
+    for line in lines:
+        parts = line.strip().split()
+        class_id = int(parts[0])
+        x_center = float(parts[1])
+        y_center = float(parts[2])
+        width = float(parts[3])
+        height = float(parts[4])
+        
+        # Convert bbox format and normalize
+        xmin = (x_center - width / 2) * img_width
+        ymin = (y_center - height / 2) * img_height
+        xmax = (x_center + width / 2) * img_width
+        ymax = (y_center + height / 2) * img_height
+        
+        # Scale to target dimensions
+        scale_x = target_width / img_width
+        scale_y = target_height / img_height
+        xmin *= scale_x
+        ymin *= scale_y
+        xmax *= scale_x
+        ymax *= scale_y
+
+        annotations.append([class_id, xmin, ymin, xmax, ymax])
     return annotations
 
-def preprocess_image(image_path, input_size):
-    image = Image.open(image_path).convert('RGB')
-    image = image.resize(input_size)
-    image_np = np.array(image, dtype=np.float32)
-    image_np = np.expand_dims(image_np, axis=0)  # Add batch dimension
-    return image_np
-
-def load_and_preprocess_image(image_path, input_details):
-    input_shape = input_details[0]['shape'][1:3]
-    return preprocess_image(image_path, input_shape)
-
-def run_inference(interpreter, image_path):
-    input_details = interpreter.get_input_details()
-    output_details = interpreter.get_output_details()
-
-    image = load_and_preprocess_image(image_path, input_details)
-    interpreter.set_tensor(input_details[0]['index'], image)
-    interpreter.invoke()
-    
-    output_data = [interpreter.get_tensor(output_details[i]['index']) for i in range(len(output_details))]
-    return output_data
 
 def calculate_iou(bbox1, bbox2):
-    x, y, w, h = bbox2
-    bbox2_xyxy = [x, y, x + w, y + h]
-    
-    xmin1, ymin1, xmax1, ymax1 = bbox1
-    xmin2, ymin2, xmax2, ymax2 = bbox2_xyxy
+    x1, y1, x2, y2 = bbox1
+    x3, y3, x4, y4 = bbox2[1:]
 
-    x1 = max(xmin1, xmin2)
-    y1 = max(ymin1, ymin2)
-    x2 = min(xmax1, xmax2)
-    y2 = min(ymax1, ymax2)
+    x_inter1 = max(x1, x3)
+    y_inter1 = max(y1, y3)
+    x_inter2 = min(x2, x4)
+    y_inter2 = min(y2, y4)
 
-    intersection_area = max(0, x2 - x1) * max(0, y2 - y1)
-    box1_area = (xmax1 - xmin1) * (ymax1 - ymin1)
-    box2_area = (xmax2 - xmin2) * (ymax2 - ymin2)
-    union_area = box1_area + box2_area - intersection_area
-    iou = intersection_area / union_area if union_area != 0 else 0
+    inter_area = max(0, x_inter2 - x_inter1) * max(0, y_inter2 - y_inter1)
+    bbox1_area = (x2 - x1) * (y2 - y1)
+    bbox2_area = (x4 - x3) * (y4 - y3)
+    iou = inter_area / (bbox1_area + bbox2_area - inter_area) if bbox1_area + bbox2_area - inter_area != 0 else 0
     return iou
 
-def evaluate_detections(annotations, detections, image_id, iou_threshold=0.5):
+def visualize_detections(image_path, detections, annotations):
+    image = Image.open(image_path)
+    image = image.resize((640,640))
+    draw = ImageDraw.Draw(image)
+    
+    # Draw ground truth annotations in red
+    for ann in annotations:
+        class_id, xmin, ymin, xmax, ymax = ann
+        draw.rectangle([xmin, ymin, xmax, ymax], outline="red", width=2)
+    
+    # Draw detections in green
+    for detection in detections:
+        xmin, ymin, xmax, ymax = detection
+        draw.rectangle([xmin, ymin, xmax, ymax], outline="green", width=2)
+    
+    image.show()
+
+def evaluate_detections(gt_annotations, detections, img_width, img_height, iou_threshold=0.5):
     true_positives = 0
     false_positives = 0
     false_negatives = 0
-    gt_annotations = [ann for ann in annotations['annotations'] if ann['image_id'] == image_id]
     matched_gt = set()
 
     for detection in detections:
         max_iou = 0
         matched_gt_ann = None
         for gt_ann in gt_annotations:
-            iou = calculate_iou(detection[:4], gt_ann['bbox'])
+            iou = calculate_iou(detection, gt_ann)
             if iou > max_iou:
                 max_iou = iou
                 matched_gt_ann = gt_ann
 
         if max_iou >= iou_threshold:
             true_positives += 1
-            matched_gt.add(matched_gt_ann['id'])
+            matched_gt.add(tuple(matched_gt_ann))
         else:
             false_positives += 1
 
@@ -82,76 +102,89 @@ def evaluate_detections(annotations, detections, image_id, iou_threshold=0.5):
 
     return precision, recall, f1_score
 
-def visualize(image_path, detections, annotations):
-    image = Image.open(image_path)
-    draw = ImageDraw.Draw(image)
-    
-    for detection in detections:
-        draw.rectangle(detection[:4], outline="green")
-    
-    for ann in annotations:
-        bbox = ann['bbox']
-        x, y, w, h = bbox
-        x1, y1, x2, y2 = x, y, x + w, y + h
-        draw.rectangle([x1, y1, x2, y2], outline="red", width=2)
-    
-    image.show()
-
-def test_tflite_model(model_path, annotations_path, image_dir):
-    annotations = load_annotations(annotations_path)
+def test_yolo_model(model_path, image_dir, label_dir):
     precisions = []
     recalls = []
     f1_scores = []
     processing_times = []
     count = 0
 
-    interpreter = tf.lite.Interpreter(model_path=model_path, num_threads=4)
+    interpreter = tf.lite.Interpreter(model_path, num_threads=8)
     interpreter.allocate_tensors()
+    processor = ProcessTFLite()
 
-    for image_info in annotations['images']:
-        count += 1
-        image_path = os.path.join(image_dir, image_info['file_name'])
+    image_files = [f for f in os.listdir(image_dir) if f.endswith(('.jpg', '.png'))]
 
-        time_start = time.time()
-        output_data = run_inference(interpreter, image_path)
-        print(output_data[0].shape)
-        processing_time = time.time() - time_start
+    with torch.no_grad():
+        for image_file in image_files:
+            count += 1
+            image_path = os.path.join(image_dir, image_file)
+            label_path = os.path.join(label_dir, os.path.splitext(image_file)[0] + '.txt')
 
-        detections = []
-        for i in range(output_data[0].shape[1]):
-            bbox = output_data[0][0, i, :4]  # Adjust index based on model output
-            confidence = output_data[0][0, i, 4]
-            class_id = output_data[0][0, i, 5]
-            if confidence > 0.5:  # Confidence threshold
-                detections.append(list(bbox) + [class_id, confidence])
+            if not os.path.exists(label_path):
+                continue
 
-        precision, recall, f1_score = evaluate_detections(annotations, detections, image_info['id'])
-        precisions.append(precision)
-        recalls.append(recall)
-        f1_scores.append(f1_score)
-        processing_times.append(processing_time)
+            image = Image.open(image_path)
+            img_width, img_height = image.size
 
-        print(f"Image ID: {image_info['id']} - Precision: {precision}, Recall: {recall}", f"F1 Score: {f1_score}")
-        # visualize(image_path, detections, [ann for ann in annotations['annotations'] if ann['image_id'] == image_info['id']])
-        break
+            gt_annotations = load_annotations(label_path, img_height=img_height, img_width=img_width)
+
+
+            try:
+                input_data = processor.preprocess(image_path)
+
+                time_start = time.time()
+                output_data = processor.predict(input_data, interpreter=interpreter)
+                processing_time = time.time() - time_start
+
+                output = processor.process_output(output_data)
+                detections = processor.postprocess(output, image_path)
+
+                precision, recall, f1_score = evaluate_detections(gt_annotations, detections, img_width, img_height)
+                precisions.append(precision)
+                recalls.append(recall)
+                f1_scores.append(f1_score)
+                processing_times.append(processing_time)
+
+                print(f"Image: {image_file} - Precision: {precision}, Recall: {recall}, F1 Score: {f1_score}", f"Processing Time: {processing_time}")
+                # visualize_detections(image_path, detections, gt_annotations)
+                break
+
+            except TypeError as e:
+                if "object" in str(e):
+                    continue
+                else:
+                    raise e
+            
+                
+        
 
     mean_precision = np.mean(precisions) if precisions else 0
     mean_recall = np.mean(recalls) if recalls else 0
     mean_f1_score = np.mean(f1_scores) if f1_scores else 0
     mean_processing_time = np.mean(processing_times) if processing_times else 0
-
     print(f"Total images processed: {count}")
-    print(f"Mean Precision: {mean_precision}, Mean Recall: {mean_recall}", f"Mean F1 Score: {mean_f1_score}", f"Mean Processing Time: {mean_processing_time}")
+    print(f"Mean Precision: {mean_precision}, Mean Recall: {mean_recall}, Mean F1 Score: {mean_f1_score}, Mean Processing Time: {mean_processing_time}")
 
-# Paths to your annotations and image directory
-annotations_path = 'COCO/annotations/instances_val2017.json'
-image_dir = 'datasets/images/val/val2017'
+# Update these paths with the paths to your own dataset
+image_dir = './datasets/images/open_images/images'
+label_dir = './datasets/images/open_images/labels'
+model_path = 'saved_model/yolov8_hdb_float32.tflite'
 
-filtered_annotations_path = "COCO/annotations/sampled_annotations.json"
-filtered_image_dir = "datasets/images/val/filtered_val2017"
+test_yolo_model(model_path, image_dir, label_dir)
 
-tflite_model_path = "saved_model/yolov8_hdb_float32.tflite"
 
-# Run the TFLite model test
-test_tflite_model(tflite_model_path, filtered_annotations_path, filtered_image_dir)
+############################## Results ###############################
+# Precision: Accuracy of positive predicitions
+# Recall: Ability to correctly identify positive instances
+# F1 score: Overall performance
+#
+# Total images processed from Open_images: 1328
+#### TFlite model with tf lite interpreter: ####
+# TF lite model (single core) : Mean Precision: 0.742, Mean Recall: 0.574, Mean F1 Score: 0.591, Mean Processing Time: 0.134
+# TF lite model (4 cores)     : Mean Precision: 0.742, Mean Recall: 0.574, Mean F1 Score: 0.591, Mean Processing Time: 0.0421
+# TF lite model (8 cores)     : Mean Precision: 0.742, Mean Recall: 0.574, Mean F1 Score: 0.591, Mean Processing Time: 0.0401
+#
+#### Pytorch model with Ultralytics:####
+# HDB_PT                      : Mean Precision: 0.653, Mean Recall: 0.630, Mean F1 Score: 0.602, Mean Processing Time: 0.0657
 
